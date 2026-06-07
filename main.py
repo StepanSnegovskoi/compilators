@@ -1,39 +1,49 @@
 import os
-from grammar import get_parser
+from lexer import Lexer
+from parser import Parser
 from semantic import SemanticAnalyzer
-from optimizer import ASTOptimizer
-from interpreter import ASTInterpreter
-from lark import Tree
-
-
-def print_tree(node, prefix="", is_last=True):
-    connector = "└── " if is_last else "├── "
-    label = node.data if isinstance(node, Tree) else str(node)
-    print(prefix + connector + label)
-
-    prefix += "    " if is_last else "│   "
-    children = [c for c in node.children if isinstance(c, Tree)]
-
-    for i, child in enumerate(children):
-        print_tree(child, prefix, i == len(children) - 1)
+from optimizer import Optimizer
+from interpreter import Interpreter
+from print_ast import print_tree
+from errors import errors
 
 
 def run():
-    parser = get_parser()
-    for f in [f for f in os.listdir('examples') if f.endswith('.pas')]:
-        with open(f'examples/{f}') as file:
+    if not os.path.exists("examples"):
+        os.makedirs("examples")
+        return
+
+    files = [f for f in os.listdir('examples') if f.endswith('.pas')]
+
+    for f in files:
+        with open(f'examples/{f}', 'r', encoding='utf-8') as file:
             code = file.read()
 
-        tree = parser.parse(code)
-        SemanticAnalyzer().visit(tree)
-        tree = ASTOptimizer().optimize(tree)
-
         print(f"\nФайл: {f}")
-        print("Оптимизированное дерево AST:")
-        print_tree(tree)
 
-        print("\nРезультат выполнения:")
-        ASTInterpreter().visit(tree)
+        errors.has_error = False
+
+        try:
+            lexer = Lexer(code)
+            tokens = lexer.tokenize()
+
+            parser = Parser(tokens)
+            ast = parser.parse()
+
+            SemanticAnalyzer().visit(ast)
+
+            ast = Optimizer().visit(ast)
+
+            print("Дерево AST:")
+            print_tree(ast)
+
+            print("\nРезультат выполнения:")
+            Interpreter().visit(ast)
+
+        except SystemExit:
+            print(f"\nКомпиляция '{f}' прервана из-за ошибок. Переходим к следующему файлу...")
+        except Exception as e:
+            print(f"\nВнутренняя ошибка в '{f}': {e}")
 
 
 if __name__ == '__main__':

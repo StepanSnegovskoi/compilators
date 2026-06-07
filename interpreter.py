@@ -1,97 +1,125 @@
-from utils import NodeVisitor
+from nodes import PascalVisitor
 
 
-class Environment:
+class Env:
     def __init__(self, parent=None):
-        self.bindings = {}
-        self.parent = parent
+        self.b, self.p = {}, parent
 
-    def define(self, name, val):
-        self.bindings[name] = val
-
-    def set(self, name, val):
-        if name in self.bindings:
-            self.bindings[name] = val
-        elif self.parent:
-            self.parent.set(name, val)
+    def set(self, n, v):
+        n = n.lower()
+        if n in self.b:
+            self.b[n] = v
+        elif self.p:
+            self.p.set(n, v)
         else:
-            self.bindings[name] = val
+            self.b[n] = v
 
-    def get(self, name):
-        if name in self.bindings: return self.bindings[name]
-        if self.parent: return self.parent.get(name)
-        return None
+    def get(self, n):
+        n = n.lower()
+        return self.b.get(n) if n in self.b else (self.p.get(n) if self.p else None)
 
 
-class ASTInterpreter(NodeVisitor):
+class Interpreter(PascalVisitor):
     def __init__(self):
-        self.env = Environment()
-        self.procedures = {}
+        self.env, self.procs = Env(), {}
 
-    def visit_program(self, node):
-        self.visit(node.children[1])
+    def visitProgNode(self, node):
+        self.visit(node.block)
 
-    def visit_proc_decl(self, node):
-        name = str(node.children[0])
-        params = [str(i) for p in node.children[1].children for i in p.children[0].children]
-        block = node.children[2]
-        self.procedures[name] = {'params': params, 'block': block}
+    def visitBlockNode(self, node):
+        for d in node.decls: self.visit(d)
+        for s in node.stmts: self.visit(s)
 
-    def visit_block(self, node):
-        self.generic_visit(node)
+    def visitVarDeclNode(self, node):
+        for n in node.names:
+            if isinstance(node.var_type, dict) and node.var_type['kind'] == 'array':
+                self.env.b[n.lower()] = {i: 0 for i in
+                                         range(node.var_type['bounds'][0], node.var_type['bounds'][1] + 1)}
+            else:
+                self.env.b[n.lower()] = 0
 
-    def visit_var_declarations(self, node):
-        self.generic_visit(node)
+    def visitProcDeclNode(self, node):
+        self.procs[node.name.lower()] = node
 
-    def visit_var_declaration(self, node):
-        for ident in node.children[0].children:
-            self.env.define(str(ident), 0)
+    def visitAssignNode(self, node):
+        val = self.visit(node.value)
+        if node.target.__class__.__name__ == 'ArrayAccessNode':
+            self.env.get(node.target.name)[self.visit(node.target.index)] = val
+        else:
+            self.env.set(node.target.name, val)
 
-    def visit_compound_statement(self, node):
-        self.visit(node.children[0])
+    def visitBinOpNode(self, node):
+        l, r = self.visit(node.left), self.visit(node.right)
+        ops = {'+': lambda x, y: x + y, '-': lambda x, y: x - y, '*': lambda x, y: x * y,
+               'div': lambda x, y: x // y, 'mod': lambda x, y: x % y, '=': lambda x, y: x == y,
+               '<>': lambda x, y: x != y, '>': lambda x, y: x > y, '<': lambda x, y: x < y,
+               'and': lambda x, y: x and y, 'or': lambda x, y: x or y}
+        return ops[node.op](l, r)
 
-    def visit_statement_list(self, node):
-        self.generic_visit(node)
+    def visitUnaryOpNode(self, node):
+        v = self.visit(node.expr)
+        return -v if node.op == '-' else (not v if node.op == 'not' else v)
 
-    def visit_number(self, node):
-        return int(node.children[0])
+    def visitVarNode(self, node):
+        return self.env.get(node.name)
 
-    def visit_simple_var(self, node):
-        return self.env.get(str(node.children[0]))
+    def visitArrayAccessNode(self, node):
+        return self.env.get(node.name)[self.visit(node.index)]
 
-    def visit_add(self, node):
-        return self.visit(node.children[0]) + self.visit(node.children[1])
+    def visitNumberNode(self, node):
+        return node.value
 
-    def visit_sub(self, node):
-        return self.visit(node.children[0]) - self.visit(node.children[1])
+    def visitCharNode(self, node):
+        return node.value
 
-    def visit_mul(self, node):
-        return self.visit(node.children[0]) * self.visit(node.children[1])
+    def visitBoolNode(self, node):
+        return node.value
 
-    def visit_div_int(self, node):
-        return self.visit(node.children[0]) // self.visit(node.children[1])
+    def visitIfNode(self, node):
+        if self.visit(node.cond):
+            self.visit(node.then_branch)
+        elif node.else_branch:
+            self.visit(node.else_branch)
 
-    def visit_assign_statement(self, node):
-        var_name = str(node.children[0].children[0])
-        self.env.set(var_name, self.visit(node.children[1]))
+    def visitWhileNode(self, node):
+        while self.visit(node.cond): self.visit(node.body)
 
-    def visit_call_statement(self, node):
-        name = str(node.children[0])
-        args = node.children[1].children if len(node.children) > 1 else []
+    def visitDoWhileNode(self, node):
+        while True:
+            self.visit(node.body)
+            if not self.visit(node.cond): break
 
-        if name in ['Write', 'WriteLn']:
-            print(" ".join(str(self.visit(a)) for a in args), end='\n' if name == 'WriteLn' else '')
-        elif name in self.procedures:
-            proc = self.procedures[name]
-            old_env = self.env
-            self.env = Environment(parent=old_env)
-            for p_name, arg_node in zip(proc['params'], args):
-                self.env.define(p_name, self.visit(arg_node))
-            self.visit(proc['block'])
-            self.env = old_env
+    def visitForNode(self, node):
+        self.env.set(node.var_name, self.visit(node.start))
+        while self.env.get(node.var_name) <= self.visit(node.end):
+            self.visit(node.body)
+            self.env.set(node.var_name, self.env.get(node.var_name) + 1)
 
-    def visit_expr_list(self, node):
-        pass
+    def visitCallNode(self, node):
+        name = node.name.lower()
 
-    def visit_empty_statement(self, node):
-        pass
+        if name in ['read', 'readln']:
+            for arg in node.args:
+                val = int(input(f"Ввод -> "))
+                if arg.__class__.__name__ == 'VarNode':
+                    self.env.set(arg.name, val)
+                elif arg.__class__.__name__ == 'ArrayAccessNode':
+                    self.env.get(arg.name)[self.visit(arg.index)] = val
+            return
+
+        args = [self.visit(a) for a in node.args]
+
+        if name in ['write', 'writeln']:
+            print(*(str(a).strip("'") for a in args), end='\n' if name == 'writeln' else ' ')
+        elif name in ['inc', 'dec']:
+            v_name = node.args[0].name
+            self.env.set(v_name, self.env.get(v_name) + (1 if name == 'inc' else -1))
+        elif name == 'abs':
+            return abs(args[0])
+        elif name in self.procs:
+            proc = self.procs[name]
+            old, self.env = self.env, Env(self.env)
+            for (p_name, _), val in zip(proc.params, args):
+                self.env.b[p_name.lower()] = val
+            self.visit(proc.block)
+            self.env = old

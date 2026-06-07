@@ -1,4 +1,5 @@
-from utils import NodeVisitor, SemanticError
+from nodes import PascalVisitor
+from errors import errors
 
 
 class SymbolTable:
@@ -6,182 +7,153 @@ class SymbolTable:
         self.symbols = {}
         self.parent = parent
 
-    def declare(self, name, sym_type, kind='var', info=None):
-        if name in self.symbols:
-            raise SemanticError(f"Идентификатор '{name}' уже объявлен.")
-        self.symbols[name] = {'type': sym_type, 'kind': kind, 'info': info}
+    def define(self, name, type_, info=None):
+        self.symbols[name.lower()] = {'type': type_, 'info': info}
 
     def lookup(self, name):
-        if name in self.symbols: return self.symbols[name]
-        if self.parent: return self.parent.lookup(name)
-        return None
+        name = name.lower()
+        if name in self.symbols:
+            return self.symbols[name]
+        return self.parent.lookup(name) if self.parent else None
 
 
-class SemanticAnalyzer(NodeVisitor):
+class SemanticAnalyzer(PascalVisitor):
     def __init__(self):
-        self.global_scope = SymbolTable()
-        self.current_scope = self.global_scope
-        for p in ['Write', 'WriteLn', 'Read', 'ReadLn', 'Inc', 'Dec']:
-            self.global_scope.declare(p, 'void', 'proc')
-        self.global_scope.declare('Abs', 'integer', 'func')
+        self.env = SymbolTable()
+        self.semantic_errors = []
 
-    def visit_program(self, node):
-        self.visit(node.children[1])
+        for p in ['write', 'writeln', 'read', 'readln', 'inc', 'dec']:
+            self.env.define(p, 'void')
+        self.env.define('abs', 'integer')
 
-    def visit_block(self, node):
-        for child in node.children:
-            self.visit(child)
+    def report(self, msg, line, col):
+        self.semantic_errors.append(f"Семантическая ошибка [{line}:{col}]: {msg}")
 
-    def visit_var_declarations(self, node):
-        for child in node.children:
-            self.visit(child)
+    def visitProgNode(self, node):
+        self.visit(node.block)
+        if self.semantic_errors:
+            for err in self.semantic_errors:
+                print(err)
+            errors.error("Семантический анализ завершился с ошибками.", node.line, node.col)
 
-    def visit_var_declaration(self, node):
-        type_node = node.children[1]
+    def visitBlockNode(self, node):
+        for d in node.decls: self.visit(d)
+        for s in node.stmts: self.visit(s)
 
-        if type_node.data == 'array_type':
-            sym_type = {'kind': 'array', 'type': type_node.children[2].data.replace('type_', '')}
-        elif type_node.data == 'type_spec':
-            sym_type = type_node.children[0].data.replace('type_', '')
-        else:
-            sym_type = type_node.data.replace('type_', '')
+    def visitVarDeclNode(self, node):
+        for name in node.names:
+            if node.var_type == 'void':
+                self.report(f"Переменная '{name}' не может иметь тип void", node.line, node.col)
+            self.env.define(name, node.var_type)
 
-        for ident in node.children[0].children:
-            self.current_scope.declare(str(ident), sym_type, 'var')
+    def visitProcDeclNode(self, node):
+        self.env.define(node.name, 'void', {'params': node.params, 'num_params': len(node.params)})
 
-    def visit_compound_statement(self, node):
-        self.visit(node.children[0])
+        old_env = self.env
+        self.env = SymbolTable(parent=old_env)
 
-    def visit_statement_list(self, node):
-        for child in node.children:
-            self.visit(child)
+        for p_name, p_type in node.params:
+            self.env.define(p_name, p_type)
 
-    def visit_number(self, node):
-        return 'integer'
+        self.visit(node.block)
+        self.env = old_env
 
-    def visit_true_const(self, node):
-        return 'boolean'
+    def visitAssignNode(self, node):
+        t1 = self.visit(node.target)
+        t2 = self.visit(node.value)
+        if t1 != t2 and t1 is not None and t2 is not None:
+            self.report(f"Несовпадение типов: нельзя присвоить '{t2}' переменной типа '{t1}'", node.line, node.col)
 
-    def visit_false_const(self, node):
-        return 'boolean'
+    def visitBinOpNode(self, node):
+        t1 = self.visit(node.left)
+        t2 = self.visit(node.right)
 
-    def visit_char_const(self, node):
-        return 'char'
+        if node.op in ['+', '-', '*', 'div', 'mod']:
+            if t1 == 'boolean' or t2 == 'boolean':
+                self.report("Арифметические операции неприменимы к boolean", node.line, node.col)
+            return 'integer'
 
-    def visit_simple_var(self, node):
-        name = str(node.children[0])
-        sym = self.current_scope.lookup(name)
-        if not sym: raise SemanticError(f"Переменная '{name}' не объявлена.")
+        if node.op == '/':
+            if t1 == 'integer' and t2 == 'integer':
+                node.op = 'div'
+                return 'integer'
+
+        if node.op in ['>', '<', '>=', '<=', '=', '<>']:
+            return 'boolean'
+        if node.op in ['and', 'or']:
+            return 'boolean'
+
+        return t1
+
+    def visitUnaryOpNode(self, node):
+        return self.visit(node.expr)
+
+    def visitVarNode(self, node):
+        sym = self.env.lookup(node.name)
+        if not sym:
+            self.report(f"Использование необъявленной переменной '{node.name}'", node.line, node.col)
+            return 'unknown'
         return sym['type']
 
-    def check_binary(self, node, expected, result):
-        t1 = self.visit(node.children[0])
-        t2 = self.visit(node.children[1])
-        if t1 != expected or t2 != expected:
-            raise SemanticError(f"Ошибка типов в '{node.data}': ожидалось {expected}, получено {t1} и {t2}")
-        return result
+    def visitArrayAccessNode(self, node):
+        sym = self.env.lookup(node.name)
+        if not sym or not isinstance(sym['type'], dict) or sym['type'].get('kind') != 'array':
+            self.report(f"'{node.name}' не является массивом", node.line, node.col)
+            return 'unknown'
 
-    def visit_add(self, node):
-        return self.check_binary(node, 'integer', 'integer')
+        index_type = self.visit(node.index)
+        if index_type != 'integer':
+            self.report(f"Индекс массива должен быть integer, получен '{index_type}'", node.line, node.col)
 
-    def visit_sub(self, node):
-        return self.check_binary(node, 'integer', 'integer')
+        return sym['type']['type']
 
-    def visit_mul(self, node):
-        return self.check_binary(node, 'integer', 'integer')
+    def visitNumberNode(self, node):
+        return 'integer'
 
-    def visit_div_int(self, node):
-        return self.check_binary(node, 'integer', 'integer')
+    def visitCharNode(self, node):
+        return 'char'
 
-    def visit_div_float(self, node):
-        t1 = self.visit(node.children[0])
-        t2 = self.visit(node.children[1])
-        if t1 == 'integer' and t2 == 'integer':
-            node.data = 'div_int'
-            return 'integer'
-        raise SemanticError("Оператор '/' применим только к типу integer.")
-
-    def visit_log_or(self, node):
-        return self.check_binary(node, 'boolean', 'boolean')
-
-    def visit_log_and(self, node):
-        return self.check_binary(node, 'boolean', 'boolean')
-
-    def check_relational(self, node):
-        t1 = self.visit(node.children[0])
-        t2 = self.visit(node.children[1])
-        if t1 != t2: raise SemanticError(f"Нельзя сравнивать типы {t1} и {t2}")
+    def visitBoolNode(self, node):
         return 'boolean'
 
-    def visit_gt(self, node):
-        return self.check_relational(node)
+    def visitCallNode(self, node):
+        name = node.name.lower()
+        sym = self.env.lookup(name)
 
-    def visit_lt(self, node):
-        return self.check_relational(node)
+        if not sym:
+            self.report(f"Процедура или функция '{node.name}' не объявлена", node.line, node.col)
+            return 'unknown'
 
-    def visit_eq(self, node):
-        return self.check_relational(node)
+        if sym['info'] and 'num_params' in sym['info']:
+            expected = sym['info']['num_params']
+            actual = len(node.args)
+            if expected != actual:
+                self.report(f"Процедура '{node.name}' ожидает {expected} аргументов, но передано {actual}", node.line,
+                            node.col)
 
-    def visit_neq(self, node):
-        return self.check_relational(node)
+        for a in node.args:
+            self.visit(a)
 
-    def visit_assign_statement(self, node):
-        var_type = self.visit(node.children[0])
-        expr_type = self.visit(node.children[1])
-        if var_type != expr_type:
-            raise SemanticError(f"Несовпадение типов при присваивании: ожидался {var_type}, получен {expr_type}.")
+        if name == 'abs': return 'integer'
+        return sym['type']
 
-    def visit_if_statement(self, node):
-        if self.visit(node.children[0]) != 'boolean': raise SemanticError("Условие if должно быть boolean.")
-        self.visit(node.children[1])
-        if len(node.children) == 3: self.visit(node.children[2])
+    def visitIfNode(self, node):
+        cond_type = self.visit(node.cond)
+        if cond_type != 'boolean' and cond_type is not None:
+            self.report("Условие if должно иметь тип boolean", node.line, node.col)
+        self.visit(node.then_branch)
+        if node.else_branch:
+            self.visit(node.else_branch)
 
-    def visit_while_statement(self, node):
-        if self.visit(node.children[0]) != 'boolean': raise SemanticError("Условие while должно быть boolean.")
-        self.visit(node.children[1])
+    def visitWhileNode(self, node):
+        self.visit(node.cond)
+        self.visit(node.body)
 
-    def visit_call_statement(self, node):
-        name = str(node.children[0])
-        sym = self.current_scope.lookup(name)
-        if not sym: raise SemanticError(f"Процедура '{name}' не объявлена.")
+    def visitDoWhileNode(self, node):
+        self.visit(node.body)
+        self.visit(node.cond)
 
-        if len(node.children) > 1:
-            args = node.children[1].children
-            if 'params' in (sym.get('info') or {}):
-                expected = len(sym['info']['params'])
-                if len(args) != expected:
-                    raise SemanticError(f"Процедура {name} ожидает {expected} аргументов.")
-
-            for arg in args:
-                self.visit(arg)
-
-    def visit_expr_list(self, node):
-        for child in node.children:
-            self.visit(child)
-
-    def visit_empty_statement(self, node):
-        pass
-
-    def visit_proc_decl(self, node):
-        name = str(node.children[0])
-        params = []
-        if len(node.children) > 2:
-            param_list = node.children[1]
-            for p_decl in param_list.children:
-                idents = p_decl.children[0].children
-                p_type = p_decl.children[1].data.replace('type_', '')
-                for ident in idents:
-                    params.append((str(ident), p_type))
-
-        self.current_scope.declare(name, 'void', 'proc', info={'params': params})
-
-        old_scope = self.current_scope
-        self.current_scope = SymbolTable(parent=old_scope)
-
-        for p_name, p_type in params:
-            self.current_scope.declare(p_name, p_type, 'var')
-
-        block_node = node.children[-1]
-        self.visit(block_node)
-
-        self.current_scope = old_scope
+    def visitForNode(self, node):
+        self.visit(node.start)
+        self.visit(node.end)
+        self.visit(node.body)

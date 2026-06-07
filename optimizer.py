@@ -1,81 +1,63 @@
-from lark import Tree, Token
+from nodes import PascalVisitor, NumberNode
 
 
-class ASTOptimizer:
-    def optimize(self, node):
-        if not isinstance(node, Tree):
-            return node
-
-        new_children = []
-        for child in node.children:
-            new_children.append(self.optimize(child))
-        node.children = new_children
-
-        if node.data in ['add', 'sub', 'mul', 'div_int']:
-            return self.optimize_arithmetic(node)
-
-        if node.data in ['gt', 'lt', 'eq', 'neq']:
-            return self.optimize_relational(node)
-
-        if node.data == 'if_statement':
-            return self.optimize_if(node)
-        if node.data == 'while_statement':
-            return self.optimize_while(node)
-
+class Optimizer(PascalVisitor):
+    def visitProgNode(self, node):
+        node.block = self.visit(node.block)
         return node
 
-    def optimize_arithmetic(self, node):
-        left, right = node.children[0], node.children[1]
-
-        if left.data == 'number' and right.data == 'number':
-            v1, v2 = int(left.children[0]), int(right.children[0])
-            if node.data == 'add':
-                res = v1 + v2
-            elif node.data == 'sub':
-                res = v1 - v2
-            elif node.data == 'mul':
-                res = v1 * v2
-            elif node.data == 'div_int':
-                if v2 == 0: return node
-                res = v1 // v2
-            return Tree('number', [Token('SIGNED_INT', str(res))])
-
-        if right.data == 'number':
-            v2 = int(right.children[0])
-            if node.data == 'add' and v2 == 0: return left
-            if node.data == 'sub' and v2 == 0: return left
-            if node.data == 'mul' and v2 == 1: return left
-            if node.data == 'mul' and v2 == 0:
-                return Tree('number', [Token('SIGNED_INT', '0')])
+    def visitBlockNode(self, node):
+        node.decls = [self.visit(d) for d in node.decls]
+        node.stmts = [self.visit(s) for s in node.stmts]
         return node
 
-    def optimize_relational(self, node):
-        left, right = node.children[0], node.children[1]
-        if left.data == 'number' and right.data == 'number':
-            v1, v2 = int(left.children[0]), int(right.children[0])
-            if node.data == 'gt':
-                res = v1 > v2
-            elif node.data == 'lt':
-                res = v1 < v2
-            elif node.data == 'eq':
-                res = v1 == v2
-            elif node.data == 'neq':
-                res = v1 != v2
-            return Tree('true_const' if res else 'false_const', [])
+    def visitAssignNode(self, node):
+        node.target = self.visit(node.target)
+        node.value = self.visit(node.value)
         return node
 
-    def optimize_if(self, node):
-        cond = node.children[0]
-        if cond.data == 'true_const':
-            return node.children[1]
-        elif cond.data == 'false_const':
-            if len(node.children) == 3:
-                return node.children[2]
-            return Tree('empty_statement', [])
+    def visitBinOpNode(self, node):
+        node.left = self.visit(node.left)
+        node.right = self.visit(node.right)
+
+        if isinstance(node.left, NumberNode) and isinstance(node.right, NumberNode):
+            v1, v2 = node.left.value, node.right.value
+            if node.op == '+': return NumberNode(v1 + v2, node.line, node.col)
+            if node.op == '-': return NumberNode(v1 - v2, node.line, node.col)
+            if node.op == '*': return NumberNode(v1 * v2, node.line, node.col)
+            if node.op == 'div' and v2 != 0: return NumberNode(v1 // v2, node.line, node.col)
         return node
 
-    def optimize_while(self, node):
-        cond = node.children[0]
-        if cond.data == 'false_const':
-            return Tree('empty_statement', [])
+    def visitIfNode(self, node):
+        node.cond = self.visit(node.cond)
+        node.then_branch = self.visit(node.then_branch)
+        if node.else_branch: node.else_branch = self.visit(node.else_branch)
+        return node
+
+    def visitForNode(self, node):
+        node.start = self.visit(node.start)
+        node.end = self.visit(node.end)
+        node.body = self.visit(node.body)
+        return node
+
+    def visitWhileNode(self, node):
+        node.cond = self.visit(node.cond)
+        node.body = self.visit(node.body)
+        return node
+
+    def visitDoWhileNode(self, node):
+        node.body = self.visit(node.body)
+        node.cond = self.visit(node.cond)
+        return node
+
+    def visitCallNode(self, node):
+        node.args = [self.visit(a) for a in node.args]
+        return node
+
+    def visitUnaryOpNode(self, node):
+        node.expr = self.visit(node.expr)
+        return node
+
+    def visitArrayAccessNode(self, node):
+        node.index = self.visit(node.index)
         return node
